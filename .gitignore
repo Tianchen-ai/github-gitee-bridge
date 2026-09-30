@@ -1,5 +1,9 @@
 # Environment variables
 .env
+.env.bridge
+bridge.toml
+state/
+.pytest_cache/
 
 # Python
 __pycache__/

@@ -1,0 +1,15 @@
+services:
+  bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.bridge
+    restart: unless-stopped
+    init: true
+    env_file: ${BRIDGE_ENV_FILE:-.env.bridge}
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./bridge.toml:/app/bridge.toml:ro
+      - bridge-state:/state
+volumes:
+  bridge-state:

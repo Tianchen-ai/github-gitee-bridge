@@ -1,288 +1,115 @@
-# GitHub-Gitee-Sync
+# GitHub ↔ Gitee Bridge
 
-Sync All the Repos(public/private) between [GitHub](https://github.com/) and [Gitee](https://gitee.com/).
+基于 [NEVSTOP-LAB/GitHub-Gitee-Sync](https://github.com/NEVSTOP-LAB/GitHub-Gitee-Sync) 的扩展：保留 Git 同步实现，新增持久化协作对象映射、Webhook 和定时核对。GitHub 为代码和对象状态主源，Gitee 为镜像及讨论入口。MIT 许可证，保留上游版权。
 
-同步 [GitHub](https://github.com/) 和 [Gitee](https://gitee.com/) 账号下的全部仓库（支持公开和私有仓库）。
+**验证状态：已提供离线 API 契约/故障测试和真实本地 Git 测试；尚未使用真实 GitHub/Gitee token 完成两平台端到端验收。** 请先在测试仓库确认账号权限、标签校验及 PR 创建约束。
 
----
+## 支持范围
 
-## 功能
+| 内容 | 当前行为 |
+| --- | --- |
+| 仓库 | 自动创建 Gitee 个人/组织仓库；两端名称和账号类型可不同 |
+| commits / branches / tags | 复用上游 `mirror_sync`；同名引用由 GitHub 强制覆盖，保留 Gitee 独有引用，不传播删除 |
+| Issues | 创建、标题/正文更新、关闭/重开；映射 GitHub ID 与 Gitee `Ixxxxx` |
+| Issue comments | 新增、编辑、原作者/来源链接；不传播删除 |
+| 开放 PR | 原生 Gitee PR；`bridge/pr/<number>/head` 专用分支，支持 fork PR，校验 head SHA |
+| PR comments | 普通讨论同步；代码行评论转换为带文件、行号、commit 和回复上下文的普通评论 |
+| PR state | open/closed 对应；GitHub merged 在正文明确标注并关闭 Gitee PR，不调用 Gitee merge |
+| 历史 closed/merged PR | 首次同步时用明确标注的 Issue 归档状态、来源和讨论，不伪造 diff |
+| Labels | 名称/颜色及 Issue/PR 标签分配；不传播仓库级标签删除 |
+| Milestones | 有截止日期的里程碑和分配；无截止日期只保留来源说明，不编造日期 |
+| Gitee → GitHub | 可选：已映射 Issue/PR 的用户评论新增、编辑 |
+| CI / Checks / Review approval / Projects / Discussions | 留在 GitHub，通过来源链接访问 |
+| Releases / Wiki | 上游 legacy CLI 保留；未纳入新 bridge 的持久化保证 |
 
-- 🔄 自动同步 GitHub 和 Gitee 账号下的全部仓库
-- ↔️ 支持多种同步方向：GitHub→Gitee / Gitee→GitHub / 双向同步
-- 🏢 支持个人账号和组织账号
-- 🔒 支持私有仓库同步
-- 🚫 支持排除指定仓库
-- 📦 支持同步 Releases、Wiki、Labels、Milestones 等附属信息
-- 🐳 提供 Docker 镜像，开箱即用
-- 🎬 提供 GitHub Action，一键集成到 Workflow
-- 📋 自动在目标平台创建不存在的仓库（可配置关闭）
+PR 的逻辑状态以正文 `Canonical PR state` 为准，Gitee 原生界面可能显示 closed 而不是 merged。历史 PR 归档后重开仍保留 Issue 表示。GitHub 修改 PR base 时，Gitee API 不支持 retarget，正文提示使用 GitHub 查看当前 diff。原文 `#123` 引用附加 GitHub 链接，不假设两边编号相同，不模拟原生自动关闭关系。
 
----
-
-## 快速开始
-
-### 前置条件
-
-- [GitHub Personal Access Token](https://github.com/settings/tokens)（需要 `repo` 权限；同步组织仓库还需要 `read:org` 权限）
-- [Gitee Personal Access Token](https://gitee.com/profile/personal_access_tokens)（需要 `projects` 权限）
-
-### 使用 GitHub Action
-
-在你的仓库中创建 `.github/workflows/sync.yml`：
-
-```yaml
-name: Sync to Gitee
-on:
-  schedule:
-    - cron: '0 2 * * *'   # 每天 UTC 2:00 自动同步
-  workflow_dispatch:        # 支持手动触发
-
-jobs:
-  sync:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Sync GitHub to Gitee
-        uses: NEVSTOP-LAB/GitHub-Gitee-Sync@v1
-        with:
-          github-owner: ${{ github.repository_owner }}
-          github-token: ${{ secrets.GH_TOKEN }}
-          gitee-owner: ${{ secrets.GITEE_OWNER }}
-          gitee-token: ${{ secrets.GITEE_TOKEN }}
-```
-
-> **注意**：需要在仓库 Settings > Secrets 中配置 `GH_TOKEN`、`GITEE_OWNER`、`GITEE_TOKEN`。
-
-### 使用 Python
+## Docker 部署（推荐）
 
 ```bash
-pip install requests
-
-python sync.py \
-  --github-owner <GitHub用户名或组织名> \
-  --github-token <GitHub Token> \
-  --gitee-owner <Gitee用户名或组织名> \
-  --gitee-token <Gitee Token>
+cp bridge.example.toml bridge.toml
+cp .env.bridge.example .env.bridge
+# 编辑仓库映射、token 和 webhook secret
+chmod 600 .env.bridge
+docker compose build
+docker compose run --rm bridge check
+docker compose run --rm bridge once
+docker compose up -d
+docker compose logs -f
 ```
 
-### 使用 Docker
+配置见 [bridge.example.toml](bridge.example.toml)，支持多个 `[[repositories]]`。凭据只从环境变量读取：
+
+- `GITHUB_TOKEN`：专用机器人账号，源仓库 Contents/Issues/Pull requests 读取权限；开启 `reverse_comments` 另需 Issues/Pull requests 写入权限。私有仓库需授权。
+- `GITEE_TOKEN`：专用机器人账号的仓库/Issue/PR 读写和 `user_info` 权限；需要目标创建/推送权限。个人目标 owner 要与 token 用户一致；组织目标需有组织权限。
+- `GITHUB_WEBHOOK_SECRET`：`serve` 必填，使用长随机值。
+- `GITEE_WEBHOOK_SECRET`：反向评论 webhook 可选，仅支持 Gitee **密码模式**。没有 webhook 时定时核对仍可回传评论。
+- `BRIDGE_STATE_DIR`：覆盖状态目录，Docker 默认 `/state`。
+
+必须使用专用机器人账号，两边机器人自己发布的普通评论不会导入为用户评论。同步内容显示原作者、平台和原始链接，不伪造身份。
+
+Compose 只监听 `127.0.0.1:8080`，请在前面配置 HTTPS 反向代理：
+
+- GitHub：`https://your-host/webhooks/github`，JSON，同一 secret；订阅 push、create/delete、issues、issue_comment、pull_request、pull_request_review_comment、label、milestone、repository。
+- Gitee：`https://your-host/webhooks/gitee`，密码模式；订阅评论/Issue/PR，并开启 `reverse_comments=true`。
+
+Webhook 验证后持久化任务并返回 202，后台读取最新 API 状态。未配置的仓库被拒绝，不保存原始 payload。没有公网入口也可以只依靠默认每 300 秒核对。
+
+## 持久化与故障恢复
+
+单个 Python 服务 + SQLite，无 Redis/外部数据库。必须保留 `bridge-state` volume，不要 `docker compose down -v`。同一状态目录只允许一个 worker；不要在不同 volume 上运行同一对仓库的实例，不要使用锁语义不可靠的网络文件系统。
 
 ```bash
-docker build -t github-gitee-sync .
-
-docker run --rm \
-  -e GITHUB_OWNER=<GitHub用户名或组织名> \
-  -e GITHUB_TOKEN=<GitHub Token> \
-  -e GITEE_OWNER=<Gitee用户名或组织名> \
-  -e GITEE_TOKEN=<Gitee Token> \
-  github-gitee-sync
-
-# 也可以使用 .env 文件
-docker run --rm --env-file .env github-gitee-sync
+docker compose exec bridge python -m bridge --config /app/bridge.toml status
+docker compose exec bridge python -m bridge --config /app/bridge.toml mappings
 ```
 
----
+`status` 显示重试、最后成功时间、错误和 pending intent。`/healthz` 只代表接收器与 worker 存活，不代表同步成功；监控还应检查 `error`、`pending` 和最后成功时间。失败退避重试，其他仓库继续；`once` 任一失败返回非零。
 
-## 参数说明
+创建前提交 intent，创建后保存映射。远端正文有稳定来源标记，恢复时校验机器人作者。POST 成功但响应丢失时，下次列举找回对象；仍找不到时保持 uncertain，不盲目重发。平台缺少通用幂等键，不能承诺无条件 exactly-once。
 
-| 参数 & 环境变量 | CLI 参数 | 必填 | 默认值 | 说明 |
-|---------------|---------|------|--------|------|
-| GitHub 账号 <br/> `GITHUB_OWNER` | `--github-owner` | ✅ | - | GitHub 用户名或组织名 |
-| GitHub Token <br/> `GITHUB_TOKEN` | `--github-token` | ✅ | - | GitHub Personal Access Token |
-| Gitee 账号 <br/> `GITEE_OWNER` | `--gitee-owner` | ✅ | - | Gitee 用户名或组织名 |
-| Gitee Token <br/> `GITEE_TOKEN` | `--gitee-token` | ✅ | - | Gitee Personal Access Token |
-| 账号类型 <br/> `ACCOUNT_TYPE` | `--account-type` | ❌ | `user` | `user`（个人）或 `org`（组织），同时应用于 GitHub 和 Gitee 两侧 |
-| 包含私有仓库 <br/> `INCLUDE_PRIVATE` | `--include-private` | ❌ | `true` | 是否同步私有仓库 |
-| 指定仓库（允许列表） <br/> `INCLUDE_REPOS` | `--include-repos` | ❌ | 空 | 逗号分隔的仓库名列表；设置后**仅同步**这些仓库，优先于排除列表 |
-| 排除仓库 <br/> `EXCLUDE_REPOS` | `--exclude-repos` | ❌ | 空 | 逗号分隔的仓库名列表；当 `include-repos` 已设置时此参数被忽略 |
-| 同步方向 <br/> `SYNC_DIRECTION` | `--direction` | ❌ | `github2gitee` | `github2gitee` / `gitee2github` / `both` / `github2local` / `gitee2local`。`*2local` 模式将仓库同步到 `--local-path` 指定的本地目录（裸仓库形式） |
-| 创建不存在的仓库 <br/> `CREATE_MISSING_REPOS` | `--create-missing-repos` | ❌ | `true` | 目标仓库不存在时是否自动创建（local target 下控制是否自动 `git init --bare`） |
-| 附属信息同步 <br/> `SYNC_EXTRA` | `--sync-extra` | ❌ | 空 | 逗号分隔：`releases,wiki,labels,milestones,issues`（local target 下不支持，会被忽略） |
-| 干运行模式 <br/> `DRY_RUN` | `--dry-run` | ❌ | `false` | 运行全部逻辑但不实际同步，用于调试和测试 |
-| 可见性过滤 <br/> `VISIBILITY` | `--visibility` | ❌ | `all` | `all` / `public` / `private`，在 include/exclude 过滤之后再次按可见性过滤仓库 |
-| 显示私有仓库名 <br/> `SHOW_PRIVATE_REPO_NAMES` | `--show-private-repo-names` | ❌ | `false` | 日志中私有仓库名的显示方式：`false` 隐藏为 `[private]`；`true` 显示完整名称；正整数 N 显示前 N 个字符（如 `3` → `[CSM****]`） |
-| Git 超时时间 <br/> `GIT_TIMEOUT` | `--git-timeout` | ❌ | `900` | 单次 git 操作的超时秒数（默认 15 分钟）；超时后自动重试一次 |
-| 本地目标路径 <br/> `LOCAL_PATH` | `--local-path` | 仅 `*2local` 方向必填 | 空 | 同步到本地的目录路径，支持 Windows（`C:\repos`）和 Linux/macOS（`/var/repos`）格式；目录不存在会自动创建，每个仓库存放为 `<local-path>/<repo>.git` 裸仓库 |
-
----
-
-## 数据安全与同步策略
-
-本工具采用**增量同步**策略，确保同步操作不会删除目标仓库上的独有内容。以下是各项同步的安全保证：
-
-### 代码同步（分支与标签）
-
-| 场景 | 行为 | 说明 |
-|------|------|------|
-| 源平台有新分支/标签 | ✅ 推送到目标 | 目标平台自动获得新分支/标签 |
-| 目标平台有独有分支 | ✅ 保留不删除 | 同步不会影响目标平台独有的分支 |
-| 目标平台有独有标签 | ✅ 保留不删除 | 同步不会影响目标平台独有的标签 |
-| 两端都有同名分支 | ⚡ 以源平台为准 | 源平台的变更会强制覆盖到目标平台 |
-
-**技术实现：** 使用 `git push --all --force` + `git push --tags --force` 代替 `git push --mirror`，确保只推送分支和标签，不会删除目标端独有的引用。
-
-### Wiki 同步
-
-| 场景 | 行为 | 说明 |
-|------|------|------|
-| 源平台有 Wiki 内容 | ✅ 推送到目标 | 目标平台自动获得 Wiki 内容 |
-| 目标平台有独有 Wiki 页面 | ✅ 保留不删除 | 同步不会影响目标平台独有的页面 |
-| 源平台无 Wiki | ⏭️ 静默跳过 | 不会影响目标平台已有的 Wiki |
-
-### 附属信息同步
-
-| 类型 | 同步策略 | 目标独有内容 | 说明 |
-|------|---------|-------------|------|
-| Releases | 增量同步 | ✅ 保留 | 按 tag_name 匹配，创建新的、更新已有的，不删除目标独有 release |
-| Labels | 增量同步 | ✅ 保留 | 按名称匹配，创建新的、更新颜色和描述，不删除目标独有标签 |
-| Milestones | 增量同步 | ✅ 保留 | 按标题匹配，创建新的、更新状态和描述，不删除目标独有里程碑 |
-| Issues | 增量同步 | ✅ 保留 | 仅同步源平台 Open 状态的 issue，通过内嵌标记避免重复创建 |
-
-### Token 与凭据安全
-
-- **GIT_ASKPASS 认证**：Git 操作使用临时 askpass 脚本传递 Token，不会将 Token 内联到 URL 中，降低凭据泄露风险。
-- **Token 自动脱敏**：日志输出自动过滤 `ghp_`、`gho_`、`github_pat_` 等格式的 Token，以及 URL 中嵌入的凭据信息。
-- **临时文件清理**：同步完成后自动清理临时克隆目录和 askpass 脚本。
-- **最小权限原则**：GitHub Token 只需 `repo` 权限，Gitee Token 只需 `projects` 权限。
-
-### Dry-Run 模式
-
-建议首次使用时启用 `--dry-run` 模式，运行全部逻辑但不实际执行同步操作，可以预览将要同步的仓库列表和操作，确认无误后再正式运行。
-
----
-
-## 使用示例
-
-```yaml
-# 反向同步：Gitee → GitHub
-- uses: NEVSTOP-LAB/GitHub-Gitee-Sync@v1
-  with:
-    github-owner: myuser
-    github-token: ${{ secrets.GH_TOKEN }}
-    gitee-owner: myuser
-    gitee-token: ${{ secrets.GITEE_TOKEN }}
-    direction: gitee2github
-
-# 双向同步
-- uses: NEVSTOP-LAB/GitHub-Gitee-Sync@v1
-  with:
-    github-owner: myuser
-    github-token: ${{ secrets.GH_TOKEN }}
-    gitee-owner: myuser
-    gitee-token: ${{ secrets.GITEE_TOKEN }}
-    direction: both
-
-# 仅同步指定的仓库（允许列表）
-- uses: NEVSTOP-LAB/GitHub-Gitee-Sync@v1
-  with:
-    github-owner: myuser
-    github-token: ${{ secrets.GH_TOKEN }}
-    gitee-owner: myuser
-    gitee-token: ${{ secrets.GITEE_TOKEN }}
-    include-repos: 'repo-a,repo-b'
-
-# 同步组织仓库，排除部分仓库
-- uses: NEVSTOP-LAB/GitHub-Gitee-Sync@v1
-  with:
-    github-owner: my-org
-    github-token: ${{ secrets.GH_TOKEN }}
-    gitee-owner: my-org
-    gitee-token: ${{ secrets.GITEE_TOKEN }}
-    account-type: org
-    exclude-repos: 'old-repo,deprecated-repo'
-```
-
-> **注意**：`account-type` 参数同时应用于 GitHub 和 Gitee 两侧，不支持非对称配置（例如 GitHub 为个人账号而 Gitee 为组织账号）。如需同步组织仓库，两侧均须为组织账号。
-> 同步组织仓库时，GitHub Token 需要额外的 `read:org` 权限。
-
-```yaml
-# 同步 Releases 和 Wiki，读取 Action 输出
-- uses: NEVSTOP-LAB/GitHub-Gitee-Sync@v1
-  id: sync
-  with:
-    github-owner: myuser
-    github-token: ${{ secrets.GH_TOKEN }}
-    gitee-owner: myuser
-    gitee-token: ${{ secrets.GITEE_TOKEN }}
-    sync-extra: 'releases,wiki'
-- run: echo "Synced ${{ steps.sync.outputs['synced-count'] }} repos"
-```
-
-### 同步到本地目录（local target）
-
-通过 `direction=github2local` 或 `direction=gitee2local`，可以将仓库镜像同步到本地目录，每个仓库以裸仓库（`<local-path>/<repo>.git`）的形式存放。`local-path` 同时支持 Windows 和 Linux/macOS 路径格式。
-
-```yaml
-# GitHub → 本地目录
-- uses: NEVSTOP-LAB/GitHub-Gitee-Sync@v1
-  with:
-    github-owner: myuser
-    github-token: ${{ secrets.GH_TOKEN }}
-    gitee-owner: ''        # local target 不需要 Gitee 凭据
-    gitee-token: ''
-    direction: github2local
-    local-path: /var/backup/repos       # Linux/macOS
-    # local-path: 'C:\repos\backup'     # Windows
-```
+uncertain 时先等待核对并检查远端；确认**确实未创建**后停止服务并解除 intent：
 
 ```bash
-# 命令行: Gitee → 本地目录
-python sync.py \
-  --gitee-owner myuser \
-  --gitee-token <Gitee Token> \
-  --github-owner '' --github-token '' \
-  --direction gitee2local \
-  --local-path /var/backup/repos
+docker compose stop bridge
+docker compose run --rm bridge resolve \
+  --repository 'gh-owner/repo=>gt-owner/repo' \
+  --kind issue --source 123456 --confirm-absent
+docker compose up -d
 ```
 
-> **说明**
-> - 目录不存在时会自动创建；每次同步执行 `git clone --mirror` + `git push --all/--tags --force` 增量更新本地裸仓库。
-> - `local` target 没有 API，因此 `sync-extra`（releases/wiki/labels 等）和元信息同步会被跳过。
-> - `create-missing-repos=true`（默认）时，目标本地裸仓库不存在会自动 `git init --bare` 创建；设为 `false` 则只同步本地已存在的仓库。
+参数使用 `status` 的原值；source 是对象 ID，通常不是界面编号。错误确认可能制造重复。已创建时不要解除，保留机器人作者和标记即可自动恢复。已映射对象在远端被删除时默认报错，避免重复重建。备份用 SQLite backup API，或停服务后备份整个 volume；不要只复制运行中的主文件、遗漏 WAL。
 
----
+## 冲突策略
 
-## Action Outputs
+GitHub 代码同名引用、Issue/PR 标题正文状态和导入评论覆盖目标端修改。Gitee 新评论可回传，其回传副本由 Gitee 原评论控制。Gitee 独有分支保留，同名分支会被覆盖；代码修改请在 GitHub 提 PR，不要在 Gitee 合并镜像 PR。源仓库不得使用保留的 `bridge/pr/` 分支前缀。
 
-| Output | 说明 |
-|--------|------|
-| `synced-count` | 成功同步的仓库数量 |
-| `failed-count` | 同步失败的仓库数量 |
-| `skipped-count` | 跳过的仓库数量 |
+## Python 与 GitHub Actions
 
-## 退出码
+Python 3.10+、Git：
 
-| 退出码 | 含义 |
-|-------|------|
-| 0 | 全部成功 |
-| 1 | 部分仓库失败 |
-| 2 | 全部失败 |
-| 3 | 致命错误（认证失败、环境异常） |
+```bash
+python -m venv .venv
+.venv/bin/pip install -r requirements-bridge.txt
+# 将 token 安全导出到当前环境
+.venv/bin/python -m bridge --config bridge.toml check
+.venv/bin/python -m bridge --config bridge.toml once
+.venv/bin/python -m bridge --config bridge.toml serve
+```
 
----
+Actions 定时执行 `once`，见[自托管 runner 示例](examples/bridge-actions.yml)。必须使用固定持久化目录并串行运行；临时 hosted runner 的 cache/artifact 不保证恢复 SQLite，不推荐作为唯一状态存储。不要在不可信 PR workflow 运行带 token 的同步。
 
-## 文档
+已有 Git mirror 时可设 `sync.git=false`。开放 PR 仍要求外部工具提供 `bridge/pr/<number>/head` 且 SHA 与 GitHub 一致；普通 heads/tags mirror 不会自动生成 PR 分支。
 
-- **调研文档**
-  - [GitHub API 调研](docs/调研/GitHub-API.md)
-  - [Gitee API 调研](docs/调研/Gitee-API.md)
-  - [Git Mirror 同步机制](docs/调研/Git-Mirror-同步机制.md)
-  - [GitHub Actions 自定义 Action](docs/调研/GitHub-Actions.md)
-  - [仓库附属信息同步调研](docs/调研/仓库附属信息同步调研.md)
+## 验证和边界
 
-- **开发计划**
-  - [Python 脚本设计](docs/计划/Python-脚本设计.md)
-  - [Docker 镜像设计](docs/计划/Docker-镜像设计.md)
-  - [GitHub Action 设计](docs/计划/GitHub-Action-设计.md)
-  - [流程图](docs/计划/流程图.md)
-  - [错误处理设计](docs/计划/错误处理设计.md)
-  - [开发步骤](docs/计划/开发步骤.md)
+```bash
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pytest
+```
 
-- **实施记录**
-  - [实施记录](docs/实施记录.md)（模块结构、技术选择、代码审查反馈实施）
+真实测试仓库验收顺序：推送 main/feature/annotated tag → Issue 新建/编辑/关闭/重开 → 评论新增/编辑 → 同仓库及 fork PR → head 更新/讨论 → GitHub 合并 → 重投 Webhook → 重启服务 → 比较引用 SHA、对象数、状态和映射。开启回传后验证 Gitee 评论不回环。本仓库测试不会操作线上账号。
 
----
+不复制原始身份/时间戳、删除、审核批准、原生 diff thread、自动关闭 Issue 关系。未实现双向 Git、双向 Issue 创建、双向状态。Gitee 标签限制可能更严，拒绝会报错。里程碑移除或改为无截止日期只更新来源说明，暂不保证清除 Gitee 既有分配。每轮全量 API 分页和临时完整 Git 镜像，可能需调大 interval；未实现增量游标、LFS 对象传输或大规模吞吐优化。
 
-## License
-
-[MIT](LICENSE)
+详见[架构依据](docs/bridge-architecture.md)。原 `sync.py`、`action.yml`、`Dockerfile` 和[旧说明](README.upstream.md)保留兼容上游，旧 Issue 同步不具备新 bridge 的保证；不要让两个入口同时处理相同协作对象。

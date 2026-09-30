@@ -1,0 +1,36 @@
+# Copy to .github/workflows/bridge.yml in YOUR bridge fork.
+# Provision /var/lib/github-gitee-bridge writable by this dedicated runner first.
+# Commit non-secret repository configuration as bridge.production.toml.
+name: Bridge reconciliation
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/15 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: github-gitee-bridge
+  cancel-in-progress: false
+jobs:
+  sync:
+    runs-on: [self-hosted, linux, bridge]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: |
+          python -m venv .venv
+          .venv/bin/pip install -r requirements-bridge.txt
+      - name: Reconcile
+        env:
+          GITHUB_TOKEN: ${{ secrets.BRIDGE_GITHUB_TOKEN }}
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
+          BRIDGE_STATE_DIR: /var/lib/github-gitee-bridge
+        run: .venv/bin/python -m bridge --config bridge.production.toml once
+      - name: State
+        if: always()
+        env:
+          BRIDGE_STATE_DIR: /var/lib/github-gitee-bridge
+        run: .venv/bin/python -m bridge --config bridge.production.toml status

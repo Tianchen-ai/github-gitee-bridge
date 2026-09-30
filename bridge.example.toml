@@ -1,0 +1,20 @@
+direction = "github2gitee"
+state_dir = "./state"
+interval = 300
+
+[sync]
+git = true
+issues = true
+issue_comments = true
+pull_requests = true
+pr_comments = true
+review_comments = true
+labels = true
+milestones = true
+reverse_comments = false
+
+[[repositories]]
+github = "your-github-owner/project"
+gitee = "your-gitee-owner/project"
+gitee_account_type = "user" # user or org, independent of GitHub account type
+allow_public_target = false
