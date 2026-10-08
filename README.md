@@ -1,6 +1,6 @@
 # GitHub ↔ Gitee Bridge
 
-[![Tests](https://github.com/zzyu5/github-gitee-bridge/actions/workflows/test.yml/badge.svg)](https://github.com/zzyu5/github-gitee-bridge/actions/workflows/test.yml)
+[![Tests](https://github.com/Tianchen-ai/github-gitee-bridge/actions/workflows/test.yml/badge.svg)](https://github.com/Tianchen-ai/github-gitee-bridge/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](requirements-bridge.txt)
 
@@ -36,7 +36,7 @@ GitHub PR    #52  ↔  Gitee PR    #18
 需要 Docker Engine、Docker Compose，以及具有相应仓库权限的 GitHub/Gitee token。
 
 ```bash
-git clone https://github.com/zzyu5/github-gitee-bridge.git
+git clone https://github.com/Tianchen-ai/github-gitee-bridge.git
 cd github-gitee-bridge
 
 cp bridge.example.toml bridge.toml
