@@ -1,115 +1,138 @@
 # GitHub ↔ Gitee Bridge
 
-基于 [NEVSTOP-LAB/GitHub-Gitee-Sync](https://github.com/NEVSTOP-LAB/GitHub-Gitee-Sync) 的扩展：保留 Git 同步实现，新增持久化协作对象映射、Webhook 和定时核对。GitHub 为代码和对象状态主源，Gitee 为镜像及讨论入口。MIT 许可证，保留上游版权。
+[![Tests](https://github.com/zzyu5/github-gitee-bridge/actions/workflows/test.yml/badge.svg)](https://github.com/zzyu5/github-gitee-bridge/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](requirements-bridge.txt)
 
-**验证状态：2026-10-08 已在专用私有 GitHub/Gitee 仓库完成真实同步验收。** 覆盖分支/带注释标签 SHA、Issue/评论编辑、标签/里程碑、同仓库 PR 关闭/重开/合并、双向评论，以及远端创建成功后的响应丢失恢复。Docker 中也验证了全新数据库的标记恢复、两端格式 Webhook 的本机重复投递和重启后的持久化去重；未配置公网 Webhook。另有离线契约/故障测试和真实本地 Git 测试。不同账号/组织权限与跨账号 fork PR 仍需在对应环境验证。
+**让 GitHub 和 Gitee 成为同一项目的两个入口。**
 
-## 支持范围
+GitHub ↔ Gitee Bridge 将 GitHub 的代码、Issue 和 Pull Request 同步到 Gitee，并可将 Gitee 的讨论回传到 GitHub。适合以 GitHub 为主仓库、同时希望为国内用户提供代码镜像和协作入口的项目。
 
-| 内容 | 当前行为 |
-| --- | --- |
-| 仓库 | 自动创建 Gitee 个人/组织仓库；两端名称和账号类型可不同 |
-| commits / branches / tags | 复用上游 `mirror_sync`；同名引用由 GitHub 强制覆盖，保留 Gitee 独有引用，不传播删除 |
-| Issues | 创建、标题/正文更新、关闭/重开；映射 GitHub ID 与 Gitee `Ixxxxx` |
-| Issue comments | 新增、编辑、原作者/来源链接；不传播删除 |
-| 开放 PR | 原生 Gitee PR；`bridge/pr/<number>/head` 专用分支，支持 fork PR，校验 head SHA |
-| PR comments | 普通讨论同步；代码行评论转换为带文件、行号、commit 和回复上下文的普通评论 |
-| PR state | open/closed 对应；GitHub merged 在正文明确标注，保留 Gitee 自动识别的 merged，否则关闭 PR；不调用 Gitee merge |
-| 历史 closed/merged PR | 首次同步时用明确标注的 Issue 归档状态、来源和讨论，不伪造 diff |
-| Labels | 名称/颜色及 Issue/PR 标签分配；不合法的 Gitee 名称采用稳定缩写加哈希并保存映射，正文保留原名；不传播仓库级标签删除 |
-| Milestones | 有截止日期的里程碑和分配；无截止日期只保留来源说明，不编造日期 |
-| Gitee → GitHub | 可选：已映射 Issue/PR 的用户评论新增、编辑 |
-| CI / Checks / Review approval / Projects / Discussions | 留在 GitHub，通过来源链接访问 |
-| Releases / Wiki | 上游 legacy CLI 保留；未纳入新 bridge 的持久化保证 |
+一个服务、一个 SQLite 数据卷，即可通过 Docker 部署。支持定时同步和 Webhook，不依赖 Redis 或外部数据库；在没有公网入口的环境中也能通过定时核对运行。
 
-PR 的逻辑状态以正文 `Canonical PR state` 为准。真实 merge-commit 测试中，Gitee 在收到镜像提交后自动识别为 merged；这不代表 squash/rebase 等情况也必然如此，原生界面仍可能显示 closed。历史 PR 归档后重开仍保留 Issue 表示。GitHub 修改 PR base 时，Gitee API 不支持 retarget，正文提示使用 GitHub 查看当前 diff。原文 `#123` 引用附加 GitHub 链接，不假设两边编号相同，不模拟原生自动关闭关系。
+## 功能
 
-## Docker 部署（推荐）
+| 内容 | GitHub → Gitee | Gitee → GitHub |
+| --- | --- | --- |
+| 仓库、commits、branches、tags | 创建目标仓库，同步提交和引用 | — |
+| Issues | 创建、编辑、关闭、重开 | — |
+| Issue comments | 新增、编辑、来源作者和链接 | 可选，限已映射 Issue |
+| Pull Requests | 创建、标题/正文、源分支、head SHA、状态说明 | — |
+| PR discussions | 普通评论；代码行评论转为带上下文的普通评论 | 可选，限已映射 PR |
+| Labels | 名称映射、颜色、Issue/PR 标签分配 | — |
+| Milestones | 有截止日期的里程碑及其分配 | — |
 
-```bash
-cp bridge.example.toml bridge.toml
-cp .env.bridge.example .env.bridge
-# 编辑仓库映射、token 和 webhook secret
-chmod 600 .env.bridge
-docker compose build
-docker compose run --rm bridge check
-docker compose run --rm bridge once
-docker compose up -d
-docker compose logs -f
+两边的编号无需相同。Bridge 保存稳定映射，将它们视为同一个逻辑对象：
+
+```text
+GitHub Issue #31  ↔  Gitee Issue Ixxxxx
+GitHub PR    #52  ↔  Gitee PR    #18
 ```
 
-配置见 [bridge.example.toml](bridge.example.toml)，支持多个 `[[repositories]]`。凭据只从环境变量读取：
+评论以同步账号发布，并标注原作者、来源平台和原始链接。重复 Webhook 不会反复创建对象；任务失败后重试，定时核对可补偿遗漏事件。
 
-- `GITHUB_TOKEN`：专用机器人账号，源仓库 Contents/Issues/Pull requests 读取权限；开启 `reverse_comments` 另需 Issues/Pull requests 写入权限。私有仓库需授权。
-- `GITEE_TOKEN`：专用机器人账号的仓库/Issue/PR 读写和 `user_info` 权限；需要目标创建/推送权限。个人目标 owner 要与 token 用户一致；组织目标需有组织权限。
-- `GITHUB_WEBHOOK_SECRET`：`serve` 必填，使用长随机值。
-- `GITEE_WEBHOOK_SECRET`：反向评论 webhook 可选，仅支持 Gitee **密码模式**。没有 webhook 时定时核对仍可回传评论。
-- `BRIDGE_STATE_DIR`：覆盖状态目录，Docker 默认 `/state`。
+## 快速开始
 
-推荐使用专用机器人账号。防回环结合对象映射、来源标记和写入账号判定；token 所属账号手动发布的普通评论也能同步。同步内容显示原作者、平台和原始链接，不伪造身份。
-
-Compose 只监听 `127.0.0.1:8080`，请在前面配置 HTTPS 反向代理：
-
-- GitHub：`https://your-host/webhooks/github`，JSON，同一 secret；订阅 push、create/delete、issues、issue_comment、pull_request、pull_request_review_comment、label、milestone、repository。
-- Gitee：`https://your-host/webhooks/gitee`，密码模式；订阅评论/Issue/PR，并开启 `reverse_comments=true`。
-
-Webhook 验证后持久化任务并返回 202，后台读取最新 API 状态。未配置的仓库被拒绝，不保存原始 payload。没有公网入口也可以只依靠默认每 300 秒核对。
-
-## 持久化与故障恢复
-
-单个 Python 服务 + SQLite，无 Redis/外部数据库。必须保留 `bridge-state` volume，不要 `docker compose down -v`。同一状态目录只允许一个 worker；不要在不同 volume 上运行同一对仓库的实例，不要使用锁语义不可靠的网络文件系统。
+需要 Docker Engine、Docker Compose，以及具有相应仓库权限的 GitHub/Gitee token。
 
 ```bash
+git clone https://github.com/zzyu5/github-gitee-bridge.git
+cd github-gitee-bridge
+
+cp bridge.example.toml bridge.toml
+cp .env.bridge.example .env.bridge
+chmod 600 .env.bridge
+```
+
+编辑 `bridge.toml`，填写仓库映射。两边的仓库名可以不同：
+
+```toml
+direction = "github2gitee"
+interval = 300
+
+[sync]
+git = true
+issues = true
+issue_comments = true
+pull_requests = true
+pr_comments = true
+reverse_comments = false
+
+[[repositories]]
+github = "github-owner/project"
+gitee = "gitee-owner/project"
+gitee_account_type = "user" # 组织仓库使用 "org"
+```
+
+在 `.env.bridge` 中填写 `GITHUB_TOKEN`、`GITEE_TOKEN`，并为 `GITHUB_WEBHOOK_SECRET` 设置长随机字符串。可以用 `openssl rand -hex 32` 生成。启用 Gitee Webhook 时，再设置独立的 `GITEE_WEBHOOK_SECRET`。
+
+```bash
+docker compose build
+docker compose run --rm bridge check  # 检查配置
+docker compose run --rm bridge once   # 完成首次同步
+docker compose up -d                  # 定时同步与 Webhook 服务
+```
+
+GitHub token 默认需要 Contents、Issues 和 Pull requests 的读取权限；开启评论回传后，另需 Issues/Pull requests 写入权限。Gitee token 需要目标仓库推送、协作内容读写及用户信息读取权限。个人目标仓库的 owner 必须与 Gitee token 所属用户一致。详见[权限与部署配置](docs/operations.md)。
+
+**GitHub 是主源：同名分支和标签会覆盖 Gitee 上的对应引用；Gitee 独有引用保留。** 私有源仓库默认不允许同步到公开目标仓库。
+
+## 接入 Webhook
+
+定时同步开箱可用，Webhook 用于更快地触发更新：
+
+| 平台 | 地址 | 验证方式 |
+| --- | --- | --- |
+| GitHub | `/webhooks/github` | `X-Hub-Signature-256`，HMAC-SHA256 |
+| Gitee | `/webhooks/gitee` | 密码模式，需开启 `reverse_comments` |
+
+Compose 默认只绑定 `127.0.0.1:8080`。需要接收平台推送时，在前面部署 HTTPS 反向代理，填写完整公网地址。没有公网访问条件时，无需配置 Webhook。
+
+Webhook 只触发任务，后台始终读取平台当前状态，避免旧事件覆盖新状态。[查看事件订阅与配置说明 →](docs/operations.md)
+
+## 状态与数据
+
+```bash
+docker compose logs -f
 docker compose exec bridge python -m bridge --config /app/bridge.toml status
 docker compose exec bridge python -m bridge --config /app/bridge.toml mappings
 ```
 
-`status` 显示重试、最后成功时间、错误和 pending intent。`/healthz` 只代表接收器与 worker 存活，不代表同步成功；监控还应检查 `error`、`pending` 和最后成功时间。失败退避重试，其他仓库继续；`once` 任一失败返回非零。
+SQLite 保存对象映射、投递记录和任务进度。请保留 `bridge-state` 数据卷，并让同一组仓库只由一个实例处理。`/healthz` 检查服务存活；同步结果、重试和最后成功时间通过 `status` 查看。
 
-创建前提交 intent，创建后保存映射。远端正文有稳定来源标记，恢复时校验机器人作者。POST 成功但响应丢失时，下次列举找回对象；仍找不到时保持 uncertain，不盲目重发。平台缺少通用幂等键，不能承诺无条件 exactly-once。
+远端创建成功但响应丢失时，Bridge 会通过来源标记找回对象。如果无法确定是否创建成功，会保留待核查状态，避免盲目重试制造副本。[备份、监控和故障恢复 →](docs/operations.md)
 
-uncertain 时先等待核对并检查远端；确认**确实未创建**后停止服务并解除 intent：
+## 同步语义与边界
 
-```bash
-docker compose stop bridge
-docker compose run --rm bridge resolve \
-  --repository 'gh-owner/repo=>gt-owner/repo' \
-  --kind issue --source 123456 --confirm-absent
-docker compose up -d
-```
+- **合并只在 GitHub 执行。** Gitee 正文展示主源状态；保留平台自动识别的 merged，否则关闭 PR 并注明已合并，不额外生成合并提交。
+- **历史 PR 保留讨论与来源。** 首次导入时已经关闭或合并的 PR 使用 Issue 归档，避免依赖已删除的源分支。归档后重开仍保留 Issue 表示。
+- **代码与状态单向，评论可双向。** 不支持双向 Git、Gitee 新建 Issue/PR 回传或跨平台状态合并。
+- **平台特性保留在原平台。** Checks、CI、review approval、Projects 和 Discussions 通过 GitHub 来源链接访问，不复制原生审批和 diff thread。
+- **不传播删除。** Gitee 独有分支/标签、评论和对象不会因为源端删除而自动删除。标签名称不符合 Gitee 规则时使用稳定映射。
+- **差异有明确表示。** PR base 变更通过正文说明；无截止日期的里程碑保留来源信息，暂不保证清除目标已有里程碑分配。Git LFS 对象传输不在同步范围内。
 
-参数使用 `status` 的原值；source 是对象 ID，通常不是界面编号。错误确认可能制造重复。已创建时不要解除，保留机器人作者和标记即可自动恢复。已映射对象在远端被删除时默认报错，避免重复重建。备份用 SQLite backup API，或停服务后备份整个 volume；不要只复制运行中的主文件、遗漏 WAL。
+PR head 通过 GitHub 的 `refs/pull/<number>/head` 获取，不依赖 fork 在 Gitee 上存在。跨账号 fork 权限、保护分支及不同合并策略需要按实际仓库配置确认。[完整行为说明 →](docs/operations.md)
 
-## 冲突策略
+## 其他运行方式
 
-GitHub 代码同名引用、Issue/PR 标题正文状态和导入评论覆盖目标端修改。Gitee 新评论可回传，其回传副本由 Gitee 原评论控制。Gitee 独有分支保留，同名分支会被覆盖；代码修改请在 GitHub 提 PR，不要在 Gitee 合并镜像 PR。源仓库不得使用保留的 `bridge/pr/` 分支前缀。
-
-## Python 与 GitHub Actions
-
-Python 3.10+、Git：
+Python 3.10+ 与 Git：
 
 ```bash
 python -m venv .venv
 .venv/bin/pip install -r requirements-bridge.txt
-# 将 token 安全导出到当前环境
-.venv/bin/python -m bridge --config bridge.toml check
+# 将 token 和 Webhook secret 设置为环境变量
 .venv/bin/python -m bridge --config bridge.toml once
 .venv/bin/python -m bridge --config bridge.toml serve
 ```
 
-Actions 定时执行 `once`，见[自托管 runner 示例](examples/bridge-actions.yml)。必须使用固定持久化目录并串行运行；临时 hosted runner 的 cache/artifact 不保证恢复 SQLite，不推荐作为唯一状态存储。不要在不可信 PR workflow 运行带 token 的同步。
+GitHub Actions 可定时运行 `once`，参见[自托管 runner 示例](examples/bridge-actions.yml)。必须使用持久化状态目录；不建议仅靠临时 runner 的缓存保存映射。
 
-已有 Git mirror 时可设 `sync.git=false`。开放 PR 仍要求外部工具提供 `bridge/pr/<number>/head` 且 SHA 与 GitHub 一致；普通 heads/tags mirror 不会自动生成 PR 分支。
+## 参与贡献
 
-## 验证和边界
+欢迎提交 bug、改进文档或扩展平台适配。请先阅读 [贡献指南](CONTRIBUTING.md) 与[架构说明](docs/bridge-architecture.md)。提交问题时请移除 token、Webhook secret 和私有仓库内容。
 
-```bash
-.venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest
-```
+## 开源基础与许可证
 
-真实测试仓库验收顺序：推送 main/feature/annotated tag → Issue 新建/编辑/关闭/重开 → 评论新增/编辑 → 同仓库及 fork PR → head 更新/讨论 → GitHub 合并 → 重投 Webhook → 重启服务 → 比较引用 SHA、对象数、状态和映射。开启回传后验证 Gitee 评论不回环。本仓库测试不会操作线上账号。
+本项目基于 [NEVSTOP-LAB/GitHub-Gitee-Sync](https://github.com/NEVSTOP-LAB/GitHub-Gitee-Sync)，复用 Git 镜像和认证实现，并增加持久化协作同步层。对象映射设计参考了 [OpenSiFli/gitee2github-issue](https://github.com/OpenSiFli/gitee2github-issue)，Git 同步边界参考了 [Yikun/hub-mirror-action](https://github.com/Yikun/hub-mirror-action)。
 
-不复制原始身份/时间戳、删除、审核批准、原生 diff thread、自动关闭 Issue 关系。未实现双向 Git、双向 Issue 创建、双向状态。Gitee 标签要求 2–20 字符且不接受空格，名称映射可用 mappings 查询。里程碑移除或改为无截止日期只更新来源说明，暂不保证清除 Gitee 既有分配。每轮全量 API 分页和临时完整 Git 镜像，可能需调大 interval；未实现增量游标、LFS 对象传输或大规模吞吐优化。
-
-详见[架构依据](docs/bridge-architecture.md)。原 `sync.py`、`action.yml`、`Dockerfile` 和[旧说明](README.upstream.md)保留兼容上游，旧 Issue 同步不具备新 bridge 的保证；不要让两个入口同时处理相同协作对象。
+采用 [MIT License](LICENSE)，保留上游版权。原 `sync.py`、`action.yml` 和 `Dockerfile` 作为上游兼容入口保留，见 [legacy 文档](README.upstream.md)；**本项目的 Bridge 使用 `python -m bridge`、`Dockerfile.bridge` 和 Compose**。不要让两个入口同时同步相同协作对象。
