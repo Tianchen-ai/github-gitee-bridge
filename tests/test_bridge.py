@@ -58,6 +58,9 @@ class FakeAPI:
             else:
                 kind = path.split("/")[-1]
                 assert kind in {"issues", "pulls", "labels", "milestones"}, path
+                if kind == "labels" and self.platform == "gitee":
+                    assert not data["color"].startswith("#"), "Live Gitee requires bare hex"
+                    assert 2 <= len(data["name"]) <= 20 and " " not in data["name"]
                 if kind == "issues" and self.platform == "gitee":
                     assert path == "/repos/gt/issues" and data["repo"] == "project"
                 result["number"] = f"I{self.counter}" if kind == "issues" and self.platform == "gitee" else self.counter
@@ -77,7 +80,7 @@ class FakeAPI:
                 kind = parts[-2]
                 if kind == "issues" and self.platform == "gitee":
                     assert path.startswith("/repos/gt/issues/") and data["repo"] == "project"
-                row = next(r for r in self.rows[kind] if str(r["number"]) == parts[-1])
+                row = next(r for r in self.rows[kind] if str(r["name"] if kind == "labels" else r["number"]) == parts[-1])
             row.update(copy.deepcopy(data))
             return copy.deepcopy(row)
         if method == "PUT" and path.endswith("/labels"):
@@ -214,6 +217,40 @@ def test_reverse_comments_no_loop_including_lost_response(setup):
     assert len(gt.comment_rows[target_path]) == 1
     assert len(gh.comment_rows["/repos/gh/project/issues/31/comments"]) == 1
     assert state.get(repo.key, "reverse_issue_comment", 77)["target"]
+
+
+def test_token_owner_comments_sync_both_ways_without_echo(setup):
+    repo, cfg, state, gh, gt, engine = setup
+    cfg.sync["reverse_comments"] = True
+    gh.rows["issues"] = [issue()]
+    source_path = "/repos/gh/project/issues/31/comments"
+    gh.comment_rows[source_path] = [{**comment(), "user": {"id": gh.bot_id, "login": "gh"}}]
+    engine.reconcile(repo)
+    target_path = "/repos/gt/project/issues/I501/comments"
+    gt.comment_rows[target_path].append({**comment(900, "gitee"), "user": {"id": gt.bot_id, "login": "gt"}})
+    gh.lose_next_post = True
+    with pytest.raises(RuntimeError, match="response lost"):
+        engine.reconcile(repo)
+    engine.reconcile(repo)
+    engine.reconcile(repo)
+    assert len(gh.comment_rows[source_path]) == 2
+    assert len(gt.comment_rows[target_path]) == 2
+    assert state.get(repo.key, "reverse_issue_comment", 900)["target"]
+
+
+def test_gitee_label_constraints_and_assignment(setup):
+    repo, cfg, state, gh, gt, engine = setup
+    label = {"id": 123, "name": "good first issue", "color": "7057ff"}
+    gh.rows["labels"] = [label]
+    gh.rows["issues"] = [{**issue(), "labels": [label]}]
+    engine.reconcile(repo)
+    mapped = state.get(repo.key, "label", label["name"])["target"]
+    assert " " not in mapped and len(mapped) <= 20
+    assert gt.rows["issues"][0]["labels"] == [{"name": mapped}]
+    label["color"] = "123456"
+    engine.reconcile(repo)
+    assert len(gt.rows["labels"]) == 1
+    assert gt.rows["labels"][0]["color"] == "123456"
 
 
 def test_webhook_duplicate_auth_and_durable_job(setup):

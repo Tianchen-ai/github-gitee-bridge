@@ -40,7 +40,9 @@ Webhook 仅触发最新状态核对，乱序事件不回滚状态。任务 gener
 - Milestone 必须有 due_on，不编造日期。
 - GitHub [PR API](https://docs.github.com/en/rest/pulls/pulls) 的普通讨论使用 Issue comments，代码行讨论使用 review comments；[Webhook](https://docs.github.com/en/webhooks/webhook-events-and-payloads) 只触发核对。
 
-这属于文档核验与模拟契约测试，不代表真实 Gitee 写入验证。保护分支、账号配额、组织权限及 PR 差异限制需要实际测试仓库确认。
+2026-10-08 已增加专用私有仓库的真实写入验收。实际 Gitee 标签接口要求裸十六进制颜色，拒绝带 # 的颜色（与上游 helper 的假设不同）；还拒绝空格等名称，因此桥接层增加稳定名称映射。评论防回环结合已映射目标 ID、可验证的对端对象来源标记和写入身份，不再过滤 token 用户的所有普通评论。
+
+真实验收包括 Issue/PR/评论更新、标签颜色及里程碑状态/分配、代码引用、双向评论、关闭/重开及 merge-commit 合并。保护分支、其他账号配额、组织权限、跨账号 fork 和 squash/rebase 合并仍未覆盖，不能由这次同仓库验收推断全部兼容。
 
 ## 双向范围
 

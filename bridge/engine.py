@@ -15,6 +15,14 @@ def marker(repo, kind, source):
     return f"<!-- bridge:{key} -->"
 
 
+def gitee_label_name(name):
+    """Gitee rejects spaces and names outside 2–20 characters; retain source names in bodies."""
+    if re.fullmatch(r"[A-Za-z0-9_./\\\-\u4e00-\u9fff]{2,20}", name):
+        return name
+    stem = re.sub(r"[^A-Za-z0-9_-]", "-", name).strip("-")[:9] or "label"
+    return stem + "-" + hashlib.sha256(name.encode()).hexdigest()[:10]
+
+
 def attributed(obj, platform, extra=""):
     user = (obj.get("user") or {}).get("login", "unknown")
     url = obj.get("html_url", "")
@@ -139,11 +147,17 @@ class Engine:
         path = f"/repos/{repo.gitee}/labels"
         target = {r["name"]: r for r in self.gitee.list(path)}
         for label in self.github.list(f"/repos/{repo.github}/labels"):
-            data = {k: label[k] for k in ("name", "color")}
-            if label["name"] not in target:
+            name = gitee_label_name(label["name"])
+            # Live Gitee currently requires bare hex, unlike the upstream helper's '#' prefix.
+            data = {"name": name, "color": label["color"].lstrip("#")}
+            prior = self.state.get(repo.key, "label", label["name"])
+            if self.state.mapped_target(repo.key, "label", name) and not prior:
+                raise RuntimeError(f"Label name mapping collision: {label['name']}")
+            if name not in target:
                 self.gitee.request("POST", path, data=data)
-            elif target[label["name"]].get("color", "").lstrip("#") != label["color"].lstrip("#"):
-                self.gitee.request("PATCH", path + "/" + segment(label["name"]), data=data)
+            elif target[name].get("color", "").lstrip("#") != data["color"]:
+                self.gitee.request("PATCH", path + "/" + segment(name), data=data)
+            self.state.save(repo.key, "label", label["name"], name, "label")
 
     def milestones(self, repo):
         path = f"/repos/{repo.gitee}/milestones"
@@ -175,7 +189,12 @@ class Engine:
     def assign_metadata(self, repo, source, target, representation):
         root = f"/repos/{repo.gitee}"
         if self.config.sync["labels"]:
-            desired = [x["name"] for x in source.get("labels", [])]
+            desired = []
+            for label in source.get("labels", []):
+                mapping = self.state.get(repo.key, "label", label["name"])
+                if not mapping:
+                    raise RuntimeError(f"Label not synchronized: {label['name']}")
+                desired.append(mapping["target"])
             current = [x["name"] for x in target.get("labels", [])]
             if sorted(current) != sorted(desired):
                 self.gitee.request("PUT", f"{root}/{representation}/{target['number']}/labels", data=desired)
@@ -273,14 +292,23 @@ class Engine:
         gh_rows = self.github.list(gh_path)
         gt_rows = self.gitee.list(gt_path)
         comment_kind = f"{kind}_comment"
+        reverse_markers = {marker(repo.key, f"reverse_{comment_kind}", c["id"]) for c in gt_rows}
+        forward_markers = {marker(repo.key, comment_kind, c["id"]) for c in gh_rows}
+
+        def replica(comment, api, known_markers):
+            # Account identity alone is insufficient: users may also comment using the token owner.
+            return (comment.get("user") or {}).get("id") == self.bot(api)["id"] and any(
+                m in known_markers for m in re.findall(r"<!-- bridge:[0-9a-f]{64} -->", comment.get("body") or ""))
+
         for comment in gh_rows:
-            if (comment.get("user") or {}).get("id") == self.bot(self.github)["id"]:
+            if replica(comment, self.github, reverse_markers):
                 continue
             if self.state.mapped_target(repo.key, f"reverse_{comment_kind}", comment["id"]):
                 continue
             self.comment(repo, comment, comment_kind, self.gitee, gt_path, gt_rows, representation, "GitHub")
         if kind == "pull" and self.config.sync["review_comments"]:
             for comment in self.github.list(f"/repos/{repo.github}/pulls/{source['number']}/comments"):
+                forward_markers.add(marker(repo.key, "review_comment", comment["id"]))
                 comment = {**comment, "body": (comment.get("body") or "") +
                            f"\n\nCode discussion: `{comment.get('path', '')}` line "
                            f"{comment.get('line') or comment.get('original_line') or '?'} "
@@ -289,8 +317,10 @@ class Engine:
                 self.comment(repo, comment, "review_comment", self.gitee, gt_path, gt_rows, representation, "GitHub")
         if self.config.sync["reverse_comments"]:
             for comment in gt_rows:
-                # Dedicated bot account + DB mapping, not attacker-controlled text, prevents loops.
-                if (comment.get("user") or {}).get("id") == self.bot(self.gitee)["id"]:
+                if replica(comment, self.gitee, forward_markers) or any(
+                    self.state.mapped_target(repo.key, k, comment["id"])
+                    for k in (comment_kind, "review_comment")
+                ):
                     continue
                 self.comment(repo, comment, f"reverse_{comment_kind}", self.github,
                              gh_path, gh_rows, "issues", "Gitee")

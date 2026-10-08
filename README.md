@@ -2,7 +2,7 @@
 
 基于 [NEVSTOP-LAB/GitHub-Gitee-Sync](https://github.com/NEVSTOP-LAB/GitHub-Gitee-Sync) 的扩展：保留 Git 同步实现，新增持久化协作对象映射、Webhook 和定时核对。GitHub 为代码和对象状态主源，Gitee 为镜像及讨论入口。MIT 许可证，保留上游版权。
 
-**验证状态：已提供离线 API 契约/故障测试和真实本地 Git 测试；尚未使用真实 GitHub/Gitee token 完成两平台端到端验收。** 请先在测试仓库确认账号权限、标签校验及 PR 创建约束。
+**验证状态：2026-10-08 已在专用私有 GitHub/Gitee 仓库完成真实同步验收。** 覆盖分支/带注释标签 SHA、Issue/评论编辑、标签/里程碑、同仓库 PR 关闭/重开/合并、双向评论，以及远端创建成功后的响应丢失恢复。Docker 中也验证了全新数据库的标记恢复、两端格式 Webhook 的本机重复投递和重启后的持久化去重；未配置公网 Webhook。另有离线契约/故障测试和真实本地 Git 测试。不同账号/组织权限与跨账号 fork PR 仍需在对应环境验证。
 
 ## 支持范围
 
@@ -14,15 +14,15 @@
 | Issue comments | 新增、编辑、原作者/来源链接；不传播删除 |
 | 开放 PR | 原生 Gitee PR；`bridge/pr/<number>/head` 专用分支，支持 fork PR，校验 head SHA |
 | PR comments | 普通讨论同步；代码行评论转换为带文件、行号、commit 和回复上下文的普通评论 |
-| PR state | open/closed 对应；GitHub merged 在正文明确标注并关闭 Gitee PR，不调用 Gitee merge |
+| PR state | open/closed 对应；GitHub merged 在正文明确标注，保留 Gitee 自动识别的 merged，否则关闭 PR；不调用 Gitee merge |
 | 历史 closed/merged PR | 首次同步时用明确标注的 Issue 归档状态、来源和讨论，不伪造 diff |
-| Labels | 名称/颜色及 Issue/PR 标签分配；不传播仓库级标签删除 |
+| Labels | 名称/颜色及 Issue/PR 标签分配；不合法的 Gitee 名称采用稳定缩写加哈希并保存映射，正文保留原名；不传播仓库级标签删除 |
 | Milestones | 有截止日期的里程碑和分配；无截止日期只保留来源说明，不编造日期 |
 | Gitee → GitHub | 可选：已映射 Issue/PR 的用户评论新增、编辑 |
 | CI / Checks / Review approval / Projects / Discussions | 留在 GitHub，通过来源链接访问 |
 | Releases / Wiki | 上游 legacy CLI 保留；未纳入新 bridge 的持久化保证 |
 
-PR 的逻辑状态以正文 `Canonical PR state` 为准，Gitee 原生界面可能显示 closed 而不是 merged。历史 PR 归档后重开仍保留 Issue 表示。GitHub 修改 PR base 时，Gitee API 不支持 retarget，正文提示使用 GitHub 查看当前 diff。原文 `#123` 引用附加 GitHub 链接，不假设两边编号相同，不模拟原生自动关闭关系。
+PR 的逻辑状态以正文 `Canonical PR state` 为准。真实 merge-commit 测试中，Gitee 在收到镜像提交后自动识别为 merged；这不代表 squash/rebase 等情况也必然如此，原生界面仍可能显示 closed。历史 PR 归档后重开仍保留 Issue 表示。GitHub 修改 PR base 时，Gitee API 不支持 retarget，正文提示使用 GitHub 查看当前 diff。原文 `#123` 引用附加 GitHub 链接，不假设两边编号相同，不模拟原生自动关闭关系。
 
 ## Docker 部署（推荐）
 
@@ -46,7 +46,7 @@ docker compose logs -f
 - `GITEE_WEBHOOK_SECRET`：反向评论 webhook 可选，仅支持 Gitee **密码模式**。没有 webhook 时定时核对仍可回传评论。
 - `BRIDGE_STATE_DIR`：覆盖状态目录，Docker 默认 `/state`。
 
-必须使用专用机器人账号，两边机器人自己发布的普通评论不会导入为用户评论。同步内容显示原作者、平台和原始链接，不伪造身份。
+推荐使用专用机器人账号。防回环结合对象映射、来源标记和写入账号判定；token 所属账号手动发布的普通评论也能同步。同步内容显示原作者、平台和原始链接，不伪造身份。
 
 Compose 只监听 `127.0.0.1:8080`，请在前面配置 HTTPS 反向代理：
 
@@ -110,6 +110,6 @@ Actions 定时执行 `once`，见[自托管 runner 示例](examples/bridge-actio
 
 真实测试仓库验收顺序：推送 main/feature/annotated tag → Issue 新建/编辑/关闭/重开 → 评论新增/编辑 → 同仓库及 fork PR → head 更新/讨论 → GitHub 合并 → 重投 Webhook → 重启服务 → 比较引用 SHA、对象数、状态和映射。开启回传后验证 Gitee 评论不回环。本仓库测试不会操作线上账号。
 
-不复制原始身份/时间戳、删除、审核批准、原生 diff thread、自动关闭 Issue 关系。未实现双向 Git、双向 Issue 创建、双向状态。Gitee 标签限制可能更严，拒绝会报错。里程碑移除或改为无截止日期只更新来源说明，暂不保证清除 Gitee 既有分配。每轮全量 API 分页和临时完整 Git 镜像，可能需调大 interval；未实现增量游标、LFS 对象传输或大规模吞吐优化。
+不复制原始身份/时间戳、删除、审核批准、原生 diff thread、自动关闭 Issue 关系。未实现双向 Git、双向 Issue 创建、双向状态。Gitee 标签要求 2–20 字符且不接受空格，名称映射可用 mappings 查询。里程碑移除或改为无截止日期只更新来源说明，暂不保证清除 Gitee 既有分配。每轮全量 API 分页和临时完整 Git 镜像，可能需调大 interval；未实现增量游标、LFS 对象传输或大规模吞吐优化。
 
 详见[架构依据](docs/bridge-architecture.md)。原 `sync.py`、`action.yml`、`Dockerfile` 和[旧说明](README.upstream.md)保留兼容上游，旧 Issue 同步不具备新 bridge 的保证；不要让两个入口同时处理相同协作对象。
