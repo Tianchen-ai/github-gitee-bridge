@@ -1,0 +1,21 @@
+# GitHub is canonical. Gitee-only refs are retained; matching refs are overwritten.
+direction = "github2gitee"
+state_dir = "./state/intent"
+interval = 300
+
+[sync]
+git = true
+issues = true
+issue_comments = true
+pull_requests = true
+pr_comments = true
+review_comments = true
+labels = true
+milestones = true
+reverse_comments = false
+
+[[repositories]]
+github = "Tianchen-ai/Intent"
+gitee = "dongshan-community/Intent"
+gitee_account_type = "org"
+allow_public_target = false

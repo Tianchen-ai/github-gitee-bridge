@@ -9,6 +9,27 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def load_env_file(path):
+    """Read a small literal KEY=value file; never evaluate shell syntax or expand variables."""
+    allowed = {"GITHUB_TOKEN", "GITEE_TOKEN", "GITHUB_WEBHOOK_SECRET",
+               "GITEE_WEBHOOK_SECRET", "BRIDGE_STATE_DIR"}
+    values = {}
+    for number, raw in enumerate(Path(path).read_text().splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        key, separator, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not separator or key not in allowed:
+            raise ValueError(f"Invalid environment entry on line {number}")
+        if value.startswith(('"', "'")):
+            if len(value) < 2 or value[-1] != value[0]:
+                raise ValueError(f"Unclosed environment value on line {number}")
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
 @dataclass(frozen=True)
 class Repository:
     github: str

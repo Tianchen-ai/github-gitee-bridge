@@ -9,7 +9,7 @@ import pytest
 import requests
 
 from bridge.api import API, APIError
-from bridge.config import Config, Repository
+from bridge.config import Config, Repository, load_env_file
 from bridge.engine import Engine, marker
 from bridge.git import GitSync
 from bridge.service import create_app, run_jobs
@@ -382,6 +382,48 @@ def test_config_rejects_ambiguous_mapping_and_unknown_flags(tmp_path):
     path.write_text('[sync]\nisssues=true\n[[repositories]]\ngithub="a/b"\ngitee="c/d"\n')
     with pytest.raises(ValueError, match="Unknown feature"):
         Config.load(path)
+
+
+def test_env_file_is_literal_and_errors_do_not_expose_values(tmp_path):
+    env = tmp_path / "secrets.env"
+    sentinel = tmp_path / "must-not-exist"
+    env.write_text(f'# comment\nGITHUB_TOKEN="$(touch {sentinel})"\nGITEE_TOKEN=literal#token\n')
+    values = load_env_file(env)
+    assert values["GITHUB_TOKEN"] == f"$(touch {sentinel})"
+    assert values["GITEE_TOKEN"] == "literal#token"
+    assert not sentinel.exists()
+    env.write_text('UNEXPECTED=do-not-leak-this\n')
+    with pytest.raises(ValueError) as error:
+        load_env_file(env)
+    assert 'do-not-leak-this' not in str(error.value)
+
+
+def test_default_branch_patch_preserves_required_target_name(setup):
+    repo, cfg, state, gh, gt, engine = setup
+    cfg.sync["git"] = True
+    engine.git.mirror.return_value = "success"
+    source_request, target_request = gh.request, gt.request
+    current = {"private": False, "name": "Target display name", "default_branch": "master"}
+    updates = []
+
+    def source(method, path, **kwargs):
+        if method == "GET" and path == "/repos/gh/project":
+            return {"private": False, "default_branch": "main", "size": 0}
+        return source_request(method, path, **kwargs)
+
+    def target(method, path, **kwargs):
+        if path == "/repos/gt/project":
+            if method == "PATCH":
+                assert kwargs["data"]["name"] == "Target display name"
+                updates.append(kwargs["data"])
+                current.update(kwargs["data"])
+            return dict(current)
+        return target_request(method, path, **kwargs)
+
+    gh.request, gt.request = source, target
+    engine.reconcile(repo)
+    engine.reconcile(repo)
+    assert updates == [{"name": "Target display name", "default_branch": "main"}]
 
 
 def test_milestones_require_due_date_and_labels_are_updated(setup):

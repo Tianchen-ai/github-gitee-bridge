@@ -5,7 +5,7 @@ import os
 import sys
 
 from .api import API
-from .config import Config
+from .config import Config, load_env_file
 from .engine import Engine
 from .git import GitSync
 from .service import Worker, create_app, run_jobs
@@ -15,6 +15,7 @@ from .state import State
 def main():
     parser = argparse.ArgumentParser(description="Persistent GitHub → Gitee bridge")
     parser.add_argument("--config", default="bridge.toml")
+    parser.add_argument("--env-file", help="Read literal credentials/settings from a file (overrides environment)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check", help="Validate configuration without network access")
     sub.add_parser("once", help="Reconcile all configured repositories once")
@@ -30,6 +31,8 @@ def main():
     resolve.add_argument("--confirm-absent", action="store_true", required=True,
                          help="Confirm the remote object was NOT created; incorrect use can duplicate")
     args = parser.parse_args()
+    if args.env_file:
+        os.environ.update(load_env_file(args.env_file))
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     config = Config.load(args.config)
     if args.command == "check":

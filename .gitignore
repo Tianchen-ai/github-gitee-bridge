@@ -1,6 +1,7 @@
 # Environment variables
 .env
 .env.bridge
+.env.intent
 bridge.toml
 state/
 .pytest_cache/

@@ -127,6 +127,8 @@ python -m venv .venv
 
 GitHub Actions 可定时运行 `once`，参见[自托管 runner 示例](examples/bridge-actions.yml)。必须使用持久化状态目录；不建议仅靠临时 runner 的缓存保存映射。
 
+已有具体仓库配置可参考 [Intent → 东山社区示例](docs/intent-sync.md)，其入口为 `./sync-intent.sh`。Python CLI 也支持 `--env-file` 读取凭据文件，无需在 shell 中导出 token。
+
 ## 参与贡献
 
 欢迎提交 bug、改进文档或扩展平台适配。请先阅读 [贡献指南](CONTRIBUTING.md) 与[架构说明](docs/bridge-architecture.md)。提交问题时请移除 token、Webhook secret 和私有仓库内容。

@@ -111,10 +111,13 @@ class Engine:
             if features["pull_requests"] and any(b["name"].startswith("bridge/pr/") for b in
                     self.github.list(f"/repos/{repo.github}/branches")):
                 raise RuntimeError("Source uses reserved bridge/pr/ namespace; rename those branches first")
-            self.git.mirror(repo)
-            if source_repo.get("default_branch") and source_repo.get("size", 0) > 0:
-                self.gitee.request("PATCH", f"/repos/{repo.gitee}",
-                                   data={"default_branch": source_repo["default_branch"]})
+            git_status = self.git.mirror(repo)
+            if git_status != "empty" and source_repo.get("default_branch"):
+                target_repo = self.gitee.request("GET", f"/repos/{repo.gitee}")
+                if target_repo.get("default_branch") != source_repo["default_branch"]:
+                    # Gitee requires name on repository PATCH, even for a default-branch-only update.
+                    self.gitee.request("PATCH", f"/repos/{repo.gitee}", data={
+                        "name": target_repo["name"], "default_branch": source_repo["default_branch"]})
         errors = []
 
         def attempt(name, fn):

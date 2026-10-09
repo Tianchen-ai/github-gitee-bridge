@@ -19,6 +19,7 @@ class GitSync:
             repo.github, self.github_token, self.gitee_token, target_username=self.gitee_user)
         if status not in {"success", "empty"}:
             raise RuntimeError(f"Git mirror failed: {repo.github}")
+        return status
 
     def pull_head(self, repo, pull):
         """Fetch base repository's PR ref (also works for forks), verify SHA, then push."""
